@@ -1,0 +1,70 @@
+# Tangram Segmentation Pipeline Configuration
+# All paths can be absolute or relative to the working directory
+
+# Required parameters
+sdata_path:
+  - /mnt/run/jh/projects/pcos_scverse/PLA4_sdata.zarr
+  - /mnt/run/jh/projects/pcos_scverse/PLA7_sdata.zarr
+  - /mnt/run/jh/projects/pcos_scverse/PLA11_sdata.zarr
+  - /mnt/run/jh/projects/pcos_scverse/PLA318_sdata.zarr
+  - /mnt/run/jh/projects/pcos_scverse/PLA330_sdata.zarr
+  - /mnt/run/jh/projects/pcos_scverse/PLA339_sdata.zarr
+  - /mnt/run/jh/projects/pcos_scverse/PLA428_sdata.zarr
+  - /mnt/run/jh/projects/pcos_scverse/PLA613_sdata.zarr
+  - /mnt/run/jh/projects/pcos_scverse/PLA713_sdata.zarr
+sc_path:
+  - /mnt/run/jh/projects/pcos_nico/inputRef/Placenta_4.h5ad
+  - /mnt/run/jh/projects/pcos_nico/inputRef/Placenta_7.h5ad
+  - /mnt/run/jh/projects/pcos_nico/inputRef/Placenta_11.h5ad
+  - /mnt/run/jh/projects/pcos_nico/inputRef/Placenta_318.h5ad
+  - /mnt/run/jh/projects/pcos_nico/inputRef/Placenta_330.h5ad
+  - /mnt/run/jh/projects/pcos_nico/inputRef/Placenta_339.h5ad
+  - /mnt/run/jh/projects/pcos_nico/inputRef/Placenta_428.h5ad
+  - /mnt/run/jh/projects/pcos_nico/inputRef/Placenta_613.h5ad
+  - /mnt/run/jh/projects/pcos_nico/inputRef/Placenta_713.h5ad
+output_dir:
+  - /mnt/run/jh/projects/pcos_scverse/results/tg/PLA4/
+  - /mnt/run/jh/projects/pcos_scverse/results/tg/PLA7/
+  - /mnt/run/jh/projects/pcos_scverse/results/tg/PLA11/
+  - /mnt/run/jh/projects/pcos_scverse/results/tg/PLA318/
+  - /mnt/run/jh/projects/pcos_scverse/results/tg/PLA330/
+  - /mnt/run/jh/projects/pcos_scverse/results/tg/PLA339/
+  - /mnt/run/jh/projects/pcos_scverse/results/tg/PLA428/
+  - /mnt/run/jh/projects/pcos_scverse/results/tg/PLA613/
+  - /mnt/run/jh/projects/pcos_scverse/results/tg/PLA713/
+library_id:
+  - PLA4
+  - PLA7
+  - PLA11
+  - PLA318
+  - PLA330
+  - PLA339
+  - PLA428
+  - PLA613
+  - PLA713
+image_key:
+  - B05067G5_HE_regist
+  - C05098E4_HE_regist
+  - B05063C1_HE_regist
+  - B05064E2_HE_regist
+  - B05066G4_HE_regist
+  - B05064D1_HE_regist
+  - B05062E4_HE_regist
+  - C05098E2_HE_regist
+  - C05098G2_HE_regist
+
+max_workers: 9  # Parallel workers
+
+# Optional parameters (defaults shown)
+table_key: bin100_table
+hires_scale: 0
+lowres_scale: 4
+n_classes: 3
+n_top_genes: 100
+num_epochs: 1000
+device: cpu  # or cuda:0 for GPU
+n_jobs: -1  # -1 for all CPUs
+
+# Filtering parameters
+min_cell_count: 1  # Minimum cells per spot
+min_gene_pct: 0.01  # Minimum % of spots expressing gene (0.01 = 1%)
