@@ -13,9 +13,18 @@ dependencies = [
     "img_norm",
 ]
 
+[tool.setuptools.packages.find]
+include = ["ezsp*"]
+
+[dependency-groups]
+dev = [
+    "ipython>=8.0.0",
+    "pytest>=7.0.0",
+]
+
 [tool.uv]
-package = false
+package = true
 
 [tool.uv.sources]
 img_norm = { git = "https://github.com/brainfo/imgnorms", branch = "main" }
-tangram-sc = { git = "https://github.com/brainfo/Tangram" }
+tangram-sc = { git = "https://github.com/brainfo/Tangram"}

@@ -1,5 +1,2 @@
-## from sdata to tangram deconvolution, paralllel samples
-
-```python
-python -m ezsp.segment_tg --config config/tg.yaml
-```
+- segment_adata is for deconvolution of low resolution adata (parallel processing samples, tested on real world data)
+- segment_sdata is to aggregate counts for segemented cells, at single cell resolution (not test on real world data yet)
