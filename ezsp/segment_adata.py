@@ -125,6 +125,8 @@ def prepare_single_cell_reference(
     n_top_genes: int = 100,
     groupby: str = "major_celltype",
     min_cells_per_type: int = 10,
+    cell_types: set[str] | None = None,
+    cell_types_proportion: dict[str, float] | None = None,
 ) -> tuple[AnnData, list[str]]:
     """Load and prepare single-cell reference data for Tangram."""
     adata_sc = sc.read_h5ad(sc_path)
@@ -132,7 +134,7 @@ def prepare_single_cell_reference(
     
     # Filter cell types by minimum cell count
     celltype_counts = adata_sc.obs[groupby].value_counts()
-    valid_celltypes = celltype_counts[celltype_counts >= min_cells_per_type].index.tolist()
+    valid_celltypes = set(celltype_counts[celltype_counts >= min_cells_per_type].index.tolist()) & cell_types
     removed = celltype_counts[celltype_counts < min_cells_per_type]
     
     if len(removed) > 0:
@@ -140,6 +142,49 @@ def prepare_single_cell_reference(
     
     adata_sc = adata_sc[adata_sc.obs[groupby].isin(valid_celltypes)].copy()
     logger.info(f"After filtering: {adata_sc.shape}, {len(valid_celltypes)} cell types")
+    if cell_types_proportion is not None:
+        # Calculate available counts per cell type
+        ct_counts = {}
+        for ct in valid_celltypes:
+            ct_mask = adata_sc.obs[groupby] == ct
+            ct_counts[ct] = ct_mask.sum()
+        
+        # Find the limiting cell type using ratio: count / proportion
+        # The cell type with the lowest ratio is the true bottleneck
+        # This ensures all cell types can be downsampled (no upsampling needed)
+        limiting_ratios = {
+            ct: ct_counts[ct] / prop 
+            for ct, prop in cell_types_proportion.items() 
+            if prop > 0 and ct_counts[ct] > 0
+        }
+        
+        if not limiting_ratios:
+            logger.warning("No valid cell types for proportional sampling")
+        else:
+            limiting_ct = min(limiting_ratios, key=limiting_ratios.get)
+            total_output = int(limiting_ratios[limiting_ct])
+            logger.info(f"Limiting cell type: {limiting_ct} (ratio={limiting_ratios[limiting_ct]:.1f})")
+            logger.info(f"Total output size: {total_output}")
+            
+            # Calculate target count for each cell type
+            sampled_indices = []
+            for ct, proportion in cell_types_proportion.items():
+                ct_mask = adata_sc.obs[groupby] == ct
+                ct_indices = adata_sc.obs_names[ct_mask].tolist()
+                n_target = int(total_output * proportion)
+                
+                if n_target > 0 and len(ct_indices) > 0:
+                    # Always downsampling since limiting_ct ensures n_target <= len(ct_indices)
+                    sampled = np.random.choice(ct_indices, size=n_target, replace=False)
+                    sampled_indices.extend(sampled)
+                    logger.info(f"Sampled {n_target}/{len(ct_indices)} cells for {ct} (target proportion={proportion})")
+            
+            adata_sc = adata_sc[sampled_indices].copy()
+            
+            # Log actual proportions achieved
+            actual_props = adata_sc.obs[groupby].value_counts(normalize=True)
+            logger.info(f"After proportional sampling: {adata_sc.shape}")
+            logger.info(f"Achieved proportions: {dict(actual_props)}")
     
     # Rank genes
     adata_sc.X = adata_sc.layers["log_norm"].copy()
@@ -162,8 +207,15 @@ def run_tangram_deconvolution(
     device: str = "cpu",
     random_state: int = 404,
     output_dir: Optional[pathlib.Path] = None,
+    min_segment_confidence: float = 0.0,
 ) -> tuple[AnnData, AnnData]:
-    """Run Tangram spatial deconvolution."""
+    """Run Tangram spatial deconvolution.
+    
+    Args:
+        min_segment_confidence: Minimum probability threshold for segment assignment.
+            Segments with max probability below this are labeled "Unassigned".
+            Set to 0.0 to disable (default). Typical values: 0.1-0.3.
+    """
     genes_common = list(set(genes).intersection(set(adata_sp.var_names)))
     logger.info(f"Using {len(genes_common)} common genes for mapping")
     
@@ -192,11 +244,23 @@ def run_tangram_deconvolution(
     ct_pred = adata_sp.obsm["tangram_ct_pred"]
     for i, ct in enumerate(ct_names):
         adata_sp.obs[ct] = ct_pred[:, i]
-    adata_sp.write_h5ad(output_dir / "sp_tg_map.h5ad")
+    
     # Segment-level deconvolution
     tg.create_segment_cell_df(adata_sp)
     tg.count_cell_annotations(ad_map, adata_sc, adata_sp, annotation=annotation)
     adata_segment = tg.deconvolve_cell_annotations(adata_sp)
+    
+    # Filter low-confidence segments to "Unassigned"
+    if min_segment_confidence > 0:
+        probs = adata_segment.X
+        max_probs = probs.max(axis=1)
+        low_conf_mask = max_probs < min_segment_confidence
+        n_unassigned = low_conf_mask.sum()
+        adata_segment.obs["cluster"] = np.where(
+            low_conf_mask, "Unassigned", adata_segment.obs["cluster"]
+        )
+        logger.info(f"Segment confidence filter: {n_unassigned}/{adata_segment.n_obs} segments marked as 'Unassigned' (threshold={min_segment_confidence})")
+    
     logger.info("Completed segment-level deconvolution")
     
     return adata_sp, adata_segment
@@ -206,16 +270,16 @@ def save_results(
     adata_sp: AnnData,
     adata_segment: AnnData,
     output_dir: pathlib.Path,
+    imgc: Optional[sq.im.ImageContainer] = None,
     celltypes: Optional[list[str]] = None,
 ) -> None:
     """Save deconvolution results and visualizations."""
+
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Save h5ad files
-    adata_sp.write_h5ad(output_dir / "sp_tg.h5ad")
-    adata_segment.write_h5ad(output_dir / "segment.h5ad")
     logger.info(f"Saved results to {output_dir}")
-    
+
     if celltypes is None:
         celltypes = ["STB", "CTB", "EVT", "Fibroblast", "Myofibroblast", "VEC", "Hofbauer cells"]
     
@@ -256,6 +320,9 @@ def save_results(
     fig.savefig(output_dir / "segment_tg_he.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
     logger.info("Saved segment plots")
+    save_adata_safe(adata_sp, output_dir / "sp_tg.h5ad")
+    save_adata_safe(adata_segment, output_dir / "segment.h5ad")
+    logger.info("Saved segment h5ad")
 
 
 def run_pipeline(
@@ -275,6 +342,9 @@ def run_pipeline(
     n_jobs: int = -1,
     min_cells_per_type: int = 10,
     min_cell_count: int = 1,
+    cell_types: set[str] | None = None,
+    cell_types_proportion: dict[str, float] | None = None,
+    min_segment_confidence: float = 0.01,
 ) -> None:
     """Run the complete Tangram pipeline."""
     setup_logging(log_dir)
@@ -292,11 +362,11 @@ def run_pipeline(
         library_id=library_id, hires_scale=hires_scale, lowres_scale=lowres_scale,
     )
     
-    # Segmentation and feature extraction
-    from .segment import compute_segmentation_thresholds
+    # Segmentation
     imgc = sq.im.ImageContainer(img=adata.uns["spatial"][library_id]["images"]["hires"])
     thresholds = compute_segmentation_thresholds(imgc["image"], n_classes=n_classes, output_dir=output_dir)
-    adata = segment_and_extract_features(adata, library_id=library_id, thresh=thresholds[1], n_jobs=n_jobs)
+    # adata = output_dir / "sp_tg_map.h5ad"
+    adata, imgc = segment_and_extract_features(adata, library_id=library_id, thresh=thresholds[1], n_jobs=n_jobs)
     
     # Filter early (before tangram to keep indices consistent)
     if min_cell_count > 0:
@@ -305,16 +375,20 @@ def run_pipeline(
         logger.info(f"Filtered spots by cell_count >= {min_cell_count}: {n_before} -> {adata.n_obs}")
     
     # Single-cell reference
+    if cell_types is None and cell_types_proportion is not None:
+        cell_types = set(cell_types_proportion.keys())
     adata_sc, marker_genes = prepare_single_cell_reference(
         sc_path, n_top_genes=n_top_genes, min_cells_per_type=min_cells_per_type,
+        cell_types=cell_types, cell_types_proportion=cell_types_proportion,
     )
     
     # Tangram deconvolution
     adata_sp, adata_segment = run_tangram_deconvolution(
-        adata_sc, adata, genes=marker_genes, num_epochs=num_epochs, device=device, output_dir=output_dir,
+        adata_sc, adata, genes=marker_genes, num_epochs=num_epochs, device=device,
+        output_dir=output_dir, min_segment_confidence=min_segment_confidence,
     )
     
-    save_results(adata_sp, adata_segment, output_dir)
+    save_results(adata_sp, adata_segment, output_dir, imgc=imgc)
     logger.info(f"=== Completed {library_id} ===")
 
 
@@ -413,7 +487,13 @@ def main():
                 "n_jobs": config.get("n_jobs", -1),
                 "min_cells_per_type": config.get("min_cells_per_type", 10),
                 "min_cell_count": config.get("min_cell_count", 1),
+                "min_segment_confidence": config.get("min_segment_confidence", 0.0),
             }
+            # Add cell_types_proportion if provided in config
+            proportions = config.get("cell_type_proportion")
+            if proportions and i < len(proportions) and proportions[i]:
+                params["cell_types_proportion"] = proportions[i]
+                params["cell_types"] = set(proportions[i].keys())
             batch_params.append(params)
         
         run_batch(batch_params, max_workers=config.get("max_workers", 1))
@@ -435,6 +515,9 @@ def main():
             n_jobs=config.get("n_jobs", -1),
             min_cells_per_type=config.get("min_cells_per_type", 10),
             min_cell_count=config.get("min_cell_count", 1),
+            cell_types=set(config["cell_type_proportion"].keys()) if config.get("cell_type_proportion") else None,
+            cell_types_proportion=config.get("cell_type_proportion"),
+            min_segment_confidence=config.get("min_segment_confidence", 0.0),
         )
 
 
