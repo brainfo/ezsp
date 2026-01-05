@@ -53,6 +53,70 @@ image_key:
   - C05098E2_HE_regist
   - C05098G2_HE_regist
 
+cell_type_proportion:
+  - # PLA11
+    CTB: 0.0776
+    Fibroblast: 0.2503
+    Hofbauer cells: 0.0037
+    STB: 0.3795
+    VEC: 0.2889
+
+  - # PLA318
+    CTB: 0.0252
+    Fibroblast: 0.2405
+    Hofbauer cells: 0.0058
+    STB: 0.4171
+    VEC: 0.3114
+
+  - # PLA330
+    CTB: 0.0286
+    Fibroblast: 0.1850
+    Hofbauer cells: 0.0044
+    STB: 0.5161
+    VEC: 0.2659
+
+  - # PLA339
+    CTB: 0.0301
+    Fibroblast: 0.2705
+    Hofbauer cells: 0.0056
+    STB: 0.4778
+    VEC: 0.2160
+
+  - # PLA4
+    CTB: 0.0840
+    Fibroblast: 0.3044
+    Hofbauer cells: 0.0036
+    STB: 0.4900
+    VEC: 0.1180
+
+  - # PLA412
+    CTB: 0.0259
+    Fibroblast: 0.3298
+    Hofbauer cells: 0.0112
+    STB: 0.3268
+    VEC: 0.3063
+
+  - # PLA613
+    CTB: 0.0159
+    Fibroblast: 0.3041
+    Hofbauer cells: 0.0058
+    STB: 0.4513
+    VEC: 0.2229
+
+  - # PLA7
+    CTB: 0.0772
+    Fibroblast: 0.2792
+    Hofbauer cells: 0.0041
+    STB: 0.4118
+    VEC: 0.2277
+
+  - # PLA713
+    CTB: 0.0338
+    Fibroblast: 0.2196
+    Hofbauer cells: 0.0039
+    STB: 0.4716
+    VEC: 0.2711
+
 max_workers: 9  # Parallel workers
 
 # Optional parameters (defaults shown)
