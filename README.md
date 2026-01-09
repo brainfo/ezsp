@@ -1,2 +1,6 @@
-- segment_adata is for deconvolution of low resolution adata (parallel processing samples, tested on real world data)
-- segment_sdata is to aggregate counts for segemented cells, at single cell resolution (not test on real world data yet)
+easily using scikit-image, squidpy, tangram to segment, deconvolute, and map.
+
+```python
+python -m ezsp tangram config.yaml   # runs tg_adata pipeline
+python -m ezsp plot config.yaml      # runs pl plotting
+```
