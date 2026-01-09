@@ -13,7 +13,7 @@ class TestSafeUpdateSdata:
 
     def test_successful_write_and_verify(self, temp_dir):
         """Test successful write and verification workflow."""
-        from ezsp.sdata_utils import safe_update_sdata
+        from ezsp._io import safe_update_sdata
         
         # Create mock SpatialData object
         mock_sdata = MagicMock()
@@ -31,7 +31,7 @@ class TestSafeUpdateSdata:
         
         new_path = temp_dir / "new_sdata.zarr"
         
-        with patch('ezsp.sdata_utils.sd.read_zarr', return_value=mock_verify):
+        with patch('ezsp._io.sd.read_zarr', return_value=mock_verify):
             result = safe_update_sdata(mock_sdata, new_path)
         
         # Verify write was called
@@ -42,7 +42,7 @@ class TestSafeUpdateSdata:
 
     def test_verification_failure_raises_assertion(self, temp_dir):
         """Test that mismatched keys raise AssertionError."""
-        from ezsp.sdata_utils import safe_update_sdata
+        from ezsp._io import safe_update_sdata
         
         mock_sdata = MagicMock()
         mock_sdata.images.keys.return_value = ['image1', 'image2']
@@ -58,13 +58,13 @@ class TestSafeUpdateSdata:
         
         new_path = temp_dir / "new_sdata.zarr"
         
-        with patch('ezsp.sdata_utils.sd.read_zarr', return_value=mock_verify):
+        with patch('ezsp._io.sd.read_zarr', return_value=mock_verify):
             with pytest.raises(AssertionError):
                 safe_update_sdata(mock_sdata, new_path)
 
     def test_old_path_deleted_after_verification(self, temp_dir):
         """Test that old_path is deleted after successful verification."""
-        from ezsp.sdata_utils import safe_update_sdata
+        from ezsp._io import safe_update_sdata
         
         mock_sdata = MagicMock()
         mock_sdata.images.keys.return_value = []
@@ -82,7 +82,7 @@ class TestSafeUpdateSdata:
         old_path = temp_dir / "old_sdata.zarr"
         old_path.mkdir()  # Create old directory
         
-        with patch('ezsp.sdata_utils.sd.read_zarr', return_value=mock_verify):
+        with patch('ezsp._io.sd.read_zarr', return_value=mock_verify):
             safe_update_sdata(mock_sdata, new_path, old_path=old_path)
         
         # Old path should be deleted
@@ -90,7 +90,7 @@ class TestSafeUpdateSdata:
 
     def test_old_path_not_deleted_if_not_exists(self, temp_dir):
         """Test that non-existent old_path doesn't cause errors."""
-        from ezsp.sdata_utils import safe_update_sdata
+        from ezsp._io import safe_update_sdata
         
         mock_sdata = MagicMock()
         mock_sdata.images.keys.return_value = []
@@ -107,7 +107,7 @@ class TestSafeUpdateSdata:
         new_path = temp_dir / "new_sdata.zarr"
         old_path = temp_dir / "nonexistent.zarr"
         
-        with patch('ezsp.sdata_utils.sd.read_zarr', return_value=mock_verify):
+        with patch('ezsp._io.sd.read_zarr', return_value=mock_verify):
             # Should not raise even if old_path doesn't exist
             result = safe_update_sdata(mock_sdata, new_path, old_path=old_path)
         
@@ -115,7 +115,7 @@ class TestSafeUpdateSdata:
 
     def test_path_conversion(self, temp_dir):
         """Test that string paths are converted to Path objects."""
-        from ezsp.sdata_utils import safe_update_sdata
+        from ezsp._io import safe_update_sdata
         
         mock_sdata = MagicMock()
         mock_sdata.images.keys.return_value = []
@@ -131,7 +131,7 @@ class TestSafeUpdateSdata:
         
         new_path_str = str(temp_dir / "new_sdata.zarr")
         
-        with patch('ezsp.sdata_utils.sd.read_zarr', return_value=mock_verify):
+        with patch('ezsp._io.sd.read_zarr', return_value=mock_verify):
             result = safe_update_sdata(mock_sdata, new_path_str)
         
         # Should work with string path

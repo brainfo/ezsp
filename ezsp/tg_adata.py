@@ -7,7 +7,6 @@ import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Optional
 
-import yaml
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -16,79 +15,23 @@ import spatialdata as sd
 import squidpy as sq
 import tangram as tg
 from anndata import AnnData
-from matplotlib.colors import LinearSegmentedColormap
-from skimage.filters import threshold_multiotsu
 
-from .img_utils import normalize_image
-from .ref_utils import prepare_single_cell_reference
+from ._img_utils import compute_segmentation_thresholds, normalize_image
+from ._io import save_adata_safe
+from ._pp import load_config, prepare_for_squidpy, prepare_single_cell_reference, setup_logging
+from .pl import normalize_ct_proportions, plot_mapped_gene_expression
 
 logger = logging.getLogger(__name__)
 
 
-def setup_logging(log_dir: str) -> pathlib.Path:
-    """Configure logging to file and minimal console output."""
-    log_dir = pathlib.Path(log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"tangram_{time.strftime('%Y%m%d_%H%M%S')}.log"
-    
-    # Clear existing handlers
-    logging.root.handlers = []
-    
-    # File handler (detailed)
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(
-        "%(asctime)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s"
-    ))
-    
-    # Console handler (minimal)
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.WARNING)
-    console_handler.setFormatter(logging.Formatter("%(levelname)s - %(message)s"))
-    
-    logging.basicConfig(level=logging.DEBUG, handlers=[file_handler, console_handler], force=True)
-    print(f"Logging to: {log_file}")
-    return log_file
-
-
-def prepare_for_squidpy(
-    sdata: sd.SpatialData,
-    image_key: str,
-    library_id: str,
-    table_key: str = "bin100_table",
-    hires_scale: int = 0,
-    lowres_scale: int = 4,
-) -> AnnData:
-    """Prepare AnnData with spatial metadata for Squidpy."""
-    adata = sdata.tables[table_key].copy()
-    
-    img_hires = sdata.images[image_key][f"scale{hires_scale}"]["image"]
-    img_hires = img_utils.normalize_image(img_hires, compute=True)
-    img_hires = np.moveaxis(img_hires.values, 0, -1)
-    
-    img_lowres = sdata.images[image_key][f"scale{lowres_scale}"]["image"]
-    img_lowres = img_utils.normalize_image(img_lowres, compute=True)
-    img_lowres = np.moveaxis(img_lowres.values, 0, -1)
-    
-    adata.uns["spatial"] = {
-        library_id: {
-            "images": {"hires": img_hires, "lowres": img_lowres},
-            "scalefactors": {
-                "tissue_hires_scalef": 1.0 / 2.0**hires_scale,
-                "spot_diameter_fullres": 100,
-                "tissue_lowres_scalef": 1.0 / 2.0**lowres_scale,
-            },
-        }
-    }
-    return adata
 
 
 def segment_and_extract_features(
-    adata: AnnData,
+    adata: AnnData | pathlib.Path,
     library_id: str,
     thresh: float,
     n_jobs: int = -1,
-) -> AnnData:
+) -> tuple[AnnData, sq.im.ImageContainer]:
     """Perform watershed segmentation and extract cell count features."""
     os.environ["NUMBA_NUM_THREADS"] = "1"
     
@@ -102,16 +45,60 @@ def segment_and_extract_features(
             "props": ["label", "centroid"],
         }
     }
-    sq.im.calculate_image_features(
-        adata, imgc, layer="image", key_added="image_features",
-        features_kwargs=features_kwargs, features="segmentation",
-        mask_circle=True, n_jobs=n_jobs,
-    )
+    if isinstance(adata, pathlib.Path):
+        adata = sc.read_h5ad(adata)
+    else:
+        sq.im.calculate_image_features(
+            adata, imgc, layer="image", key_added="image_features",
+            features_kwargs=features_kwargs, features="segmentation",
+            mask_circle=True, n_jobs=n_jobs,
+        )
     
-    adata.obs["cell_count"] = adata.obsm["image_features"]["segmentation_label"]
-    logger.info(f"Extracted cell counts. Total: {adata.obs['cell_count'].sum()}")
-    return adata
+        adata.obs["cell_count"] = adata.obsm["image_features"]["segmentation_label"]
+        logger.info(f"Extracted cell counts. Total: {adata.obs['cell_count'].sum()}")
+    return adata, imgc
 
+def normalize_ct_pred_tangram_style(ct_pred: np.ndarray) -> np.ndarray:
+    """
+    Normalize cell type predictions following Tangram's methodology.
+    
+    Tangram normalizes per cell type by dividing by the max value,
+    NOT per spot to sum to 1. This ensures each cell type's values
+    range from 0 to 1, where 1 indicates the spot with highest
+    enrichment for that cell type.
+    
+    Args:
+        ct_pred: Array of shape (n_spots, n_celltypes)
+        
+    Returns:
+        Normalized array where each column max = 1.0
+    """
+    ct_pred_norm = ct_pred.copy().astype(np.float64)
+    for i in range(ct_pred_norm.shape[1]):
+        col_max = ct_pred_norm[:, i].max()
+        if col_max > 0:
+            ct_pred_norm[:, i] = ct_pred_norm[:, i] / col_max
+    return ct_pred_norm
+
+
+def normalize_ct_pred_proportion_style(ct_pred: np.ndarray) -> np.ndarray:
+    """
+    Alternative normalization: per-spot proportions summing to 1.
+    
+    This gives cell type composition per spot, useful when you want
+    to know "what fraction of this spot is cell type X".
+    
+    Args:
+        ct_pred: Array of shape (n_spots, n_celltypes)
+        
+    Returns:
+        Normalized array where each row sums to 1.0
+    """
+    ct_pred_norm = ct_pred.copy().astype(np.float64)
+    row_sums = ct_pred_norm.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1  # Avoid division by zero
+    ct_pred_norm = ct_pred_norm / row_sums
+    return ct_pred_norm
 
 def run_tangram_deconvolution(
     adata_sc: AnnData,
@@ -123,13 +110,27 @@ def run_tangram_deconvolution(
     random_state: int = 404,
     output_dir: Optional[pathlib.Path] = None,
     min_segment_confidence: float = 0.0,
-) -> tuple[AnnData, AnnData]:
-    """Run Tangram spatial deconvolution.
+    project_genes: bool = True,
+    test_genes: list[str] | None = None,
+) -> tuple[AnnData, AnnData, AnnData | None]:
+    """
+    Run Tangram spatial deconvolution with proper normalization.
     
     Args:
-        min_segment_confidence: Minimum probability threshold for segment assignment.
-            Segments with max probability below this are labeled "Unassigned".
-            Set to 0.0 to disable (default). Typical values: 0.1-0.3.
+        adata_sc: Single-cell reference AnnData
+        adata_sp: Spatial AnnData
+        genes: Training genes for mapping
+        annotation: Cell type annotation column in adata_sc.obs
+        num_epochs: Training epochs
+        device: 'cpu' or 'cuda:0'
+        random_state: Random seed
+        output_dir: Output directory for results
+        min_segment_confidence: Minimum probability threshold for segment assignment
+        project_genes: Whether to project gene expression onto space
+        test_genes: Optional list of test genes for validation
+        
+    Returns:
+        tuple: (adata_sp with ct predictions, adata_segment, ad_ge or None)
     """
     genes_common = list(set(genes).intersection(set(adata_sp.var_names)))
     logger.info(f"Using {len(genes_common)} common genes for mapping")
@@ -153,19 +154,77 @@ def run_tangram_deconvolution(
     
     logger.info(f"Completed mapping ({time.time() - start_time:.1f}s)")
     
-    # Project cell type annotations
+    # === CELL TYPE PREDICTIONS ===
+    # project_cell_annotations computes: M.T @ one_hot(annotation)
+    # Then normalizes per cell type by max value
     tg.project_cell_annotations(ad_map, adata_sp, annotation=annotation)
-    ct_names = adata_sp.uns["tangram_ct_pred_names"]
-    ct_pred = adata_sp.obsm["tangram_ct_pred"]
-    for i, ct in enumerate(ct_names):
-        adata_sp.obs[ct] = ct_pred[:, i]
     
-    # Segment-level deconvolution
+    ct_names = adata_sp.uns["tangram_ct_pred_names"]
+    ct_pred_raw = adata_sp.obsm["tangram_ct_pred"].copy()
+    
+    # Store both raw and normalized versions
+    # Raw: actual mapped cell counts (can exceed 1 in constrained mode)
+    # Tangram-norm: per-celltype max normalization (0-1 per celltype)
+    # Proportion-norm: per-spot proportions (sums to 1 per spot)
+    
+    ct_pred_tangram = normalize_ct_pred_tangram_style(ct_pred_raw)
+    ct_pred_proportion = normalize_ct_pred_proportion_style(ct_pred_raw)
+    
+    # Store in obsm
+    adata_sp.obsm["tangram_ct_pred_raw"] = ct_pred_raw
+    adata_sp.obsm["tangram_ct_pred"] = ct_pred_tangram  # Default: Tangram style
+    adata_sp.obsm["tangram_ct_pred_proportion"] = ct_pred_proportion
+    
+    # Add to obs for easy plotting (using Tangram-style normalization)
+    for i, ct in enumerate(ct_names):
+        adata_sp.obs[f"{ct}_raw"] = ct_pred_raw[:, i]
+        adata_sp.obs[f"{ct}"] = ct_pred_tangram[:, i]  # 0-1 normalized
+        adata_sp.obs[f"{ct}_proportion"] = ct_pred_proportion[:, i]
+    
+    # Log normalization statistics
+    logger.info("Cell type prediction statistics (Tangram-style normalized):")
+    for i, ct in enumerate(ct_names):
+        raw_max = ct_pred_raw[:, i].max()
+        norm_max = ct_pred_tangram[:, i].max()
+        prop_max = ct_pred_proportion[:, i].max()
+        logger.info(f"  {ct}: raw_max={raw_max:.3f}, tangram_norm_max={norm_max:.3f}, prop_max={prop_max:.3f}")
+    
+    # === GENE EXPRESSION PROJECTION ===
+    ad_ge = None
+    if project_genes:
+        logger.info("Projecting gene expression onto space...")
+        ad_ge = tg.project_genes(adata_map=ad_map, adata_sc=adata_sc)
+        
+        # Normalize projected gene expression (normalized mRNA counts as in paper)
+        # The paper uses log1p normalization for visualization
+        if ad_ge.X is not None:
+            # Store raw projected counts
+            ad_ge.layers["projected_raw"] = ad_ge.X.copy()
+            
+            # Normalize per spot (total count normalization)
+            sc.pp.normalize_total(ad_ge, target_sum=1e4)
+            ad_ge.layers["normalized"] = ad_ge.X.copy()
+            
+            # Log transform for visualization
+            sc.pp.log1p(ad_ge)
+            ad_ge.layers["log_normalized"] = ad_ge.X.copy()
+            
+            logger.info(f"Projected {ad_ge.n_vars} genes onto {ad_ge.n_obs} spots")
+        
+        # Validate with test genes if provided
+        if test_genes is not None:
+            test_genes_available = [g for g in test_genes if g in ad_ge.var_names and g in adata_sp.var_names]
+            if test_genes_available:
+                df_test = tg.compare_spatial_geneexp(ad_ge, adata_sp, adata_sc)
+                adata_sp.uns["tangram_gene_scores"] = df_test
+                logger.info(f"Computed gene expression scores for {len(test_genes_available)} test genes")
+    
+    # === SEGMENT-LEVEL DECONVOLUTION ===
     tg.create_segment_cell_df(adata_sp)
     tg.count_cell_annotations(ad_map, adata_sc, adata_sp, annotation=annotation)
     adata_segment = tg.deconvolve_cell_annotations(adata_sp)
     
-    # Filter low-confidence segments to "Unassigned"
+    # Filter low-confidence segments
     if min_segment_confidence > 0:
         probs = adata_segment.X
         max_probs = probs.max(axis=1)
@@ -174,57 +233,48 @@ def run_tangram_deconvolution(
         adata_segment.obs["cluster"] = np.where(
             low_conf_mask, "Unassigned", adata_segment.obs["cluster"]
         )
-        logger.info(f"Segment confidence filter: {n_unassigned}/{adata_segment.n_obs} segments marked as 'Unassigned' (threshold={min_segment_confidence})")
+        logger.info(f"Segment confidence filter: {n_unassigned}/{adata_segment.n_obs} marked as 'Unassigned'")
     
     logger.info("Completed segment-level deconvolution")
     
-    return adata_sp, adata_segment
-
+    return adata_sp, adata_segment, ad_ge
 
 def save_results(
     adata_sp: AnnData,
     adata_segment: AnnData,
     output_dir: pathlib.Path,
+    ad_ge: AnnData | None = None,
     imgc: Optional[sq.im.ImageContainer] = None,
     celltypes: Optional[list[str]] = None,
+    plot_genes: list[str] | None = None,
 ) -> None:
     """Save deconvolution results and visualizations."""
-
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Save h5ad files
-    logger.info(f"Saved results to {output_dir}")
-
+    
     if celltypes is None:
         celltypes = ["STB", "CTB", "EVT", "Fibroblast", "Myofibroblast", "VEC", "Hofbauer cells"]
     
-    available = [ct for ct in celltypes if ct in adata_sp.obs.columns]
-    cmap = LinearSegmentedColormap.from_list("white_to_red", ["white", "#FF0022"], N=256)
+    # Plot cell type proportions
+    ct_names, _ = normalize_ct_proportions(adata_sp)
+    for ct in celltypes:
+        if ct in ct_names:
+            values = adata_sp.obs[ct].values
+            vmin, vmax = np.percentile(values, [2.0, 98.0])
+            fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+            sq.pl.spatial_scatter(adata_sp, color=ct, cmap="viridis", vmin=vmin, vmax=vmax, ax=ax, frameon=False)
+            fig.savefig(output_dir / f"{ct}_proportion.pdf", dpi=300, bbox_inches="tight")
+            fig.savefig(output_dir / f"{ct}_proportion.png", dpi=300, bbox_inches="tight")
+            plt.close(fig)
+    logger.info("Saved cell type proportion plots")
     
-    # Plot cell type projections
-    if available:
-        n_cols = min(4, len(available))
-        n_rows = (len(available) + n_cols - 1) // n_cols
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 4 * n_rows))
-        axes = np.atleast_1d(axes).flatten()
-        
-        for i, ct in enumerate(available):
-            sq.pl.spatial_scatter(adata_sp, color=ct, shape=None, cmap=cmap, ax=axes[i])
-            axes[i].set_title(ct)
-        
-        # Hide unused axes
-        for j in range(len(available), len(axes)):
-            axes[j].axis("off")
-        
-        plt.tight_layout()
-        fig.savefig(output_dir / "celltype_projections.pdf", dpi=300, bbox_inches="tight")
-        fig.savefig(output_dir / "celltype_projections.png", dpi=300, bbox_inches="tight")
-        plt.close(fig)
-        logger.info("Saved cell type projection plot")
+    # Plot gene expression if available
+    if ad_ge is not None and plot_genes is not None:
+        for gene in plot_genes:
+            plot_mapped_gene_expression(ad_ge, adata_sp, gene, output_dir=output_dir)
     
     # Plot segment cluster assignments
     fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-    sq.pl.spatial_scatter(adata_segment, color="cluster", frameon=False, ax=ax, shape=None)
+    sq.pl.spatial_scatter(adata_segment, color="cluster", frameon=False, ax=ax)
     fig.savefig(output_dir / "segment_tg.pdf", dpi=300, bbox_inches="tight")
     fig.savefig(output_dir / "segment_tg.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -235,9 +285,36 @@ def save_results(
     fig.savefig(output_dir / "segment_tg_he.png", dpi=300, bbox_inches="tight")
     plt.close(fig)
     logger.info("Saved segment plots")
+    
+    # Save h5ad files
     save_adata_safe(adata_sp, output_dir / "sp_tg.h5ad")
     save_adata_safe(adata_segment, output_dir / "segment.h5ad")
-    logger.info("Saved segment h5ad")
+    
+    if ad_ge is not None:
+        ad_ge.write_h5ad(output_dir / "projected_genes.h5ad")
+        logger.info("Saved projected gene expression")
+    
+    # Save summary statistics
+    ct_names = adata_sp.uns.get("tangram_ct_pred_names", [])
+    if ct_names:
+        stats_data = []
+        for ct in ct_names:
+            if ct in adata_sp.obs.columns:
+                stats_data.append({
+                    "cell_type": ct,
+                    "mean_tangram": adata_sp.obs[ct].mean(),
+                    "max_tangram": adata_sp.obs[ct].max(),
+                    "mean_proportion": adata_sp.obs[f"{ct}_proportion"].mean() if f"{ct}_proportion" in adata_sp.obs else np.nan,
+                    "max_proportion": adata_sp.obs[f"{ct}_proportion"].max() if f"{ct}_proportion" in adata_sp.obs else np.nan,
+                    "mean_raw": adata_sp.obs[f"{ct}_raw"].mean() if f"{ct}_raw" in adata_sp.obs else np.nan,
+                    "max_raw": adata_sp.obs[f"{ct}_raw"].max() if f"{ct}_raw" in adata_sp.obs else np.nan,
+                })
+        
+        stats_df = pd.DataFrame(stats_data)
+        stats_df.to_csv(output_dir / "celltype_statistics.tsv", sep="\t", index=False)
+        logger.info("Saved cell type statistics")
+    
+    logger.info(f"Saved results to {output_dir}")
 
 
 def run_pipeline(
@@ -259,7 +336,9 @@ def run_pipeline(
     min_cell_count: int = 1,
     cell_types: set[str] | None = None,
     cell_types_proportion: dict[str, float] | None = None,
-    min_segment_confidence: float = 0.01,
+    min_segment_confidence: float = 0.00,
+    project_genes: bool = True,
+    plot_genes: list[str] | None = None,
 ) -> None:
     """Run the complete Tangram pipeline."""
     setup_logging(log_dir)
@@ -267,8 +346,6 @@ def run_pipeline(
     logger.info(f"=== Starting {library_id} ===")
     logger.info(f"scanpy=={sc.__version__}, squidpy=={sq.__version__}, tangram=={tg.__version__}")
     
-    # Load spatial data
-    logger.info(f"Loading spatial data from {sdata_path}")
     output_dir = pathlib.Path(output_dir)
     sdata = sd.read_zarr(sdata_path)
     
@@ -280,10 +357,9 @@ def run_pipeline(
     # Segmentation
     imgc = sq.im.ImageContainer(img=adata.uns["spatial"][library_id]["images"]["hires"])
     thresholds = compute_segmentation_thresholds(imgc["image"], n_classes=n_classes, output_dir=output_dir)
-    # adata = output_dir / "sp_tg_map.h5ad"
     adata, imgc = segment_and_extract_features(adata, library_id=library_id, thresh=thresholds[1], n_jobs=n_jobs)
     
-    # Filter early (before tangram to keep indices consistent)
+    # Filter spots with low cell count
     if min_cell_count > 0:
         n_before = adata.n_obs
         adata = adata[adata.obs["cell_count"] >= min_cell_count].copy()
@@ -298,12 +374,21 @@ def run_pipeline(
     )
     
     # Tangram deconvolution
-    adata_sp, adata_segment = run_tangram_deconvolution(
+    adata_sp, adata_segment, ad_ge = run_tangram_deconvolution(
         adata_sc, adata, genes=marker_genes, num_epochs=num_epochs, device=device,
         output_dir=output_dir, min_segment_confidence=min_segment_confidence,
+        project_genes=project_genes,
     )
     
-    save_results(adata_sp, adata_segment, output_dir, imgc=imgc)
+    # Determine genes to plot
+    if plot_genes is None and project_genes:
+        # Use some marker genes for visualization
+        plot_genes = marker_genes[:10]
+    
+    save_results(
+        adata_sp, adata_segment, output_dir, 
+        ad_ge=ad_ge, imgc=imgc, plot_genes=plot_genes
+    )
     logger.info(f"=== Completed {library_id} ===")
 
 
@@ -314,7 +399,6 @@ def run_single_sample(kwargs: dict) -> tuple[str, bool, str]:
         run_pipeline(**kwargs)
         return (sample_id, True, "Success")
     except Exception as e:
-        # Log to sample-specific crash file
         log_dir = pathlib.Path(kwargs.get("log_dir", "."))
         log_dir.mkdir(parents=True, exist_ok=True)
         crash_file = log_dir / "crash.log"
@@ -346,95 +430,8 @@ def run_batch(batch_params: list[dict], max_workers: int = 1) -> None:
                 status = "✓" if result[1] else "✗"
                 print(f"[{len(results)}/{n_samples}] {status} {result[0]}")
     
-    # Summary
     successes = sum(1 for _, ok, _ in results if ok)
     print(f"\nCompleted in {time.time() - start_time:.1f}s: {successes}/{n_samples} succeeded")
     for sample_id, ok, msg in results:
         if not ok:
             print(f"  FAILED {sample_id}: {msg}")
-
-
-def load_config(config_path: str) -> dict:
-    """Load YAML config file."""
-    with open(config_path) as f:
-        return yaml.safe_load(f)
-
-
-def main():
-    if len(sys.argv) != 2:
-        print("Usage: python -m src.segment_tg config.yaml")
-        sys.exit(1)
-    
-    config_path = sys.argv[1]
-    if not pathlib.Path(config_path).exists():
-        print(f"Config file not found: {config_path}")
-        sys.exit(1)
-    
-    config = load_config(config_path)
-    
-    # Check batch mode
-    batch_keys = ["sdata_path", "sc_path", "output_dir", "library_id", "image_key", "log_dir"]
-    is_batch = isinstance(config.get("sdata_path"), list)
-    
-    if is_batch:
-        lengths = {k: len(config[k]) for k in batch_keys if isinstance(config.get(k), list)}
-        if len(set(lengths.values())) > 1:
-            print(f"ERROR: Batch parameters must have same length: {lengths}")
-            sys.exit(1)
-        
-        n_samples = list(lengths.values())[0]
-        batch_params = []
-        for i in range(n_samples):
-            params = {
-                "sdata_path": config["sdata_path"][i],
-                "sc_path": config["sc_path"][i],
-                "output_dir": config["output_dir"][i],
-                "log_dir": config["log_dir"][i],
-                "library_id": config["library_id"][i],
-                "image_key": config["image_key"][i],
-                "table_key": config.get("table_key", "bin100_table"),
-                "hires_scale": config.get("hires_scale", 0),
-                "lowres_scale": config.get("lowres_scale", 4),
-                "n_classes": config.get("n_classes", 3),
-                "n_top_genes": config.get("n_top_genes", 100),
-                "num_epochs": config.get("num_epochs", 1000),
-                "device": config.get("device", "cpu"),
-                "n_jobs": config.get("n_jobs", -1),
-                "min_cells_per_type": config.get("min_cells_per_type", 10),
-                "min_cell_count": config.get("min_cell_count", 1),
-                "min_segment_confidence": config.get("min_segment_confidence", 0.0),
-            }
-            # Add cell_types_proportion if provided in config
-            proportions = config.get("cell_type_proportion")
-            if proportions and i < len(proportions) and proportions[i]:
-                params["cell_types_proportion"] = proportions[i]
-                params["cell_types"] = set(proportions[i].keys())
-            batch_params.append(params)
-        
-        run_batch(batch_params, max_workers=config.get("max_workers", 1))
-    else:
-        run_pipeline(
-            sdata_path=config["sdata_path"],
-            sc_path=config["sc_path"],
-            output_dir=config["output_dir"],
-            log_dir=config["log_dir"],
-            library_id=config["library_id"],
-            image_key=config["image_key"],
-            table_key=config.get("table_key", "bin100_table"),
-            hires_scale=config.get("hires_scale", 0),
-            lowres_scale=config.get("lowres_scale", 4),
-            n_classes=config.get("n_classes", 3),
-            n_top_genes=config.get("n_top_genes", 100),
-            num_epochs=config.get("num_epochs", 1000),
-            device=config.get("device", "cpu"),
-            n_jobs=config.get("n_jobs", -1),
-            min_cells_per_type=config.get("min_cells_per_type", 10),
-            min_cell_count=config.get("min_cell_count", 1),
-            cell_types=set(config["cell_type_proportion"].keys()) if config.get("cell_type_proportion") else None,
-            cell_types_proportion=config.get("cell_type_proportion"),
-            min_segment_confidence=config.get("min_segment_confidence", 0.0),
-        )
-
-
-if __name__ == "__main__":
-    main()

@@ -2,6 +2,9 @@ import spatialdata as sd
 from spatialdata.models import ShapesModel, TableModel, Image2DModel
 import squidpy as sq
 import numpy as np
+import pandas as pd
+from scipy import sparse
+from anndata import AnnData
 
 from ._img_utils import normalize_image
 
@@ -84,3 +87,144 @@ def segment4sdata(
         _io.safe_update_sdata(sdata, save)
     return sdata
 
+
+def create_cell_gene_matrix(
+    sdata: sd.SpatialData,
+    points_key: str = "bin1_genes",
+    gene_column: str = "gene",
+    labels_key: str = "cell_labels",
+    shapes_key: str = "cells",
+    min_counts: int = 0,
+) -> AnnData:
+    """
+    Create a cell-by-gene count matrix from transcript points assigned to cells.
+    
+    Parameters
+    ----------
+    sdata : sd.SpatialData
+        SpatialData object with segmented cells and transcript points.
+    points_key : str
+        Key for the points element containing transcripts.
+    gene_column : str
+        Column name in points dataframe containing gene names.
+    labels_key : str
+        Key for the labels element containing cell segmentation mask.
+    shapes_key : str
+        Key for the shapes element containing cell polygons.
+    min_counts : int
+        Minimum number of transcripts per cell to include.
+        
+    Returns
+    -------
+    AnnData
+        Cell-by-gene count matrix with:
+        - .X: sparse count matrix (cells × genes)
+        - .obs: cell metadata (cell_id, centroid_x, centroid_y, n_transcripts, area)
+        - .var: gene metadata
+        - .obsm['spatial']: cell centroid coordinates for plotting
+    """
+    # Get segmentation mask
+    seg_mask = sdata.labels[labels_key].values
+    if seg_mask.ndim > 2:
+        seg_mask = seg_mask.squeeze()
+    
+    # Get points and assign to cells
+    points_df = sdata.points[points_key].compute()
+    
+    # Check if gene column exists
+    if gene_column not in points_df.columns:
+        raise ValueError(
+            f"Gene column '{gene_column}' not found in points. "
+            f"Available columns: {list(points_df.columns)}"
+        )
+    
+    # Get cell label for each point
+    y_coords = points_df["y"].values.astype(int)
+    x_coords = points_df["x"].values.astype(int)
+    
+    # Clip to image bounds
+    y_coords = np.clip(y_coords, 0, seg_mask.shape[0] - 1)
+    x_coords = np.clip(x_coords, 0, seg_mask.shape[1] - 1)
+    
+    # Assign cell labels
+    points_df["cell_id"] = seg_mask[y_coords, x_coords]
+    
+    # Filter out background (cell_id == 0)
+    points_in_cells = points_df[points_df["cell_id"] > 0].copy()
+    
+    # Get unique cells and genes
+    unique_cells = np.sort(points_in_cells["cell_id"].unique())
+    unique_genes = np.sort(points_in_cells[gene_column].unique())
+    
+    # Create cell and gene index mappings
+    cell_to_idx = {cell: idx for idx, cell in enumerate(unique_cells)}
+    gene_to_idx = {gene: idx for idx, gene in enumerate(unique_genes)}
+    
+    # Count transcripts per cell-gene pair
+    counts = points_in_cells.groupby(["cell_id", gene_column]).size().reset_index(name="count")
+    
+    # Build sparse matrix
+    row_indices = counts["cell_id"].map(cell_to_idx).values
+    col_indices = counts[gene_column].map(gene_to_idx).values
+    data = counts["count"].values
+    
+    count_matrix = sparse.csr_matrix(
+        (data, (row_indices, col_indices)),
+        shape=(len(unique_cells), len(unique_genes)),
+        dtype=np.float32,
+    )
+    
+    # Build obs (cell metadata)
+    # Calculate per-cell statistics
+    cell_stats = points_in_cells.groupby("cell_id").agg(
+        n_transcripts=("cell_id", "size"),
+        centroid_x=("x", "mean"),
+        centroid_y=("y", "mean"),
+    ).reset_index()
+    
+    # Add area from shapes if available
+    if shapes_key in sdata.shapes:
+        shapes = sdata.shapes[shapes_key]
+        cell_stats["area"] = cell_stats["cell_id"].map(
+            dict(zip(shapes.index, shapes.geometry.area))
+        )
+    
+    # Filter by min_counts
+    if min_counts > 0:
+        valid_cells = cell_stats[cell_stats["n_transcripts"] >= min_counts]["cell_id"].values
+        valid_mask = np.isin(unique_cells, valid_cells)
+        unique_cells = unique_cells[valid_mask]
+        count_matrix = count_matrix[valid_mask, :]
+        cell_stats = cell_stats[cell_stats["cell_id"].isin(unique_cells)]
+    
+    # Create obs DataFrame
+    obs = pd.DataFrame({
+        "cell_id": unique_cells,
+    })
+    obs = obs.merge(cell_stats, on="cell_id", how="left")
+    obs.index = [f"cell_{cid}" for cid in obs["cell_id"]]
+    
+    # Create var DataFrame
+    var = pd.DataFrame(index=unique_genes)
+    var.index.name = "gene"
+    
+    # Build AnnData
+    adata = AnnData(
+        X=count_matrix,
+        obs=obs,
+        var=var,
+    )
+    
+    # Add spatial coordinates to obsm
+    adata.obsm["spatial"] = obs[["centroid_x", "centroid_y"]].values
+    
+    # Store metadata
+    adata.uns["spatial_info"] = {
+        "points_key": points_key,
+        "gene_column": gene_column,
+        "n_cells": len(unique_cells),
+        "n_genes": len(unique_genes),
+        "n_transcripts_total": int(count_matrix.sum()),
+    }
+    
+    return adata

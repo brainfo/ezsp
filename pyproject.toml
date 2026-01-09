@@ -13,6 +13,9 @@ dependencies = [
     "img_norm",
 ]
 
+[project.scripts]
+ezsp = "ezsp.__main__:main"
+
 [tool.setuptools.packages.find]
 include = ["ezsp*"]
 

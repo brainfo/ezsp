@@ -1,0 +1,43 @@
+# Tangram Pipeline Configuration Template
+# Usage: python -m ezsp tangram tangram_template.yaml
+
+# === REQUIRED: Input/Output Paths ===
+# For single sample: use single values
+# For batch mode: use lists (all must be same length)
+
+sdata_path: /path/to/sample.zarr        # SpatialData zarr file
+sc_path: /path/to/reference.h5ad        # Single-cell reference h5ad
+output_dir: /path/to/output/            # Output directory
+log_dir: /path/to/logs/                 # Log files directory
+library_id: SAMPLE_ID                   # Sample identifier
+image_key: image_regist                 # Image key in SpatialData
+
+# === OPTIONAL: Cell Type Configuration ===
+# If specified, only these cell types are used (with proportions)
+# cell_type_proportion:
+#   CTB: 0.10
+#   STB: 0.40
+#   Fibroblast: 0.30
+#   VEC: 0.20
+
+# === OPTIONAL: Pipeline Parameters (defaults shown) ===
+table_key: bin100_table     # Table key in SpatialData
+hires_scale: 0              # High-res image scale level
+lowres_scale: 4             # Low-res image scale level
+n_classes: 3                # Multi-Otsu threshold classes
+n_top_genes: 100            # Top marker genes per cell type
+num_epochs: 1000            # Tangram training epochs
+device: cpu                 # cpu or cuda:0
+n_jobs: -1                  # CPUs for feature extraction (-1=all)
+min_cells_per_type: 10      # Min cells per type in reference
+min_cell_count: 1           # Min cells per spatial spot
+min_segment_confidence: 0.0 # Min confidence for segment assignment
+project_genes: true         # Project gene expression to space
+# plot_genes: [GENE1, GENE2] # Genes to plot (default: top markers)
+
+# === BATCH MODE ===
+# For batch processing, provide lists:
+# sdata_path:
+#   - /path/to/sample1.zarr
+#   - /path/to/sample2.zarr
+# max_workers: 2             # Parallel workers for batch

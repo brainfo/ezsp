@@ -1,0 +1,34 @@
+# Plot Configuration Template
+# Usage: python -m ezsp plot plot_template.yaml
+
+# === REQUIRED: Input Paths ===
+# For single sample: use single values
+# For batch mode: use lists (all must be same length)
+
+sp_h5ad:
+  - /path/to/sp_tg.h5ad         # Tangram output h5ad file
+
+library_id:
+  - SAMPLE_ID                    # Library ID for spatial scatter
+
+output_dir:
+  - /path/to/output/             # Where to save plots
+
+# === OPTIONAL: Plot Settings (defaults shown) ===
+dpi: 300                         # Output image DPI
+figsize: [8, 8]                  # Figure size [width, height]
+cmap: viridis                    # Colormap
+perc: 2.0                        # Percentile clipping for vmin/vmax
+suffix: ""                       # Suffix for output filenames
+
+# === BATCH MODE ===
+# For batch processing, provide lists:
+# sp_h5ad:
+#   - /path/to/sample1/sp_tg.h5ad
+#   - /path/to/sample2/sp_tg.h5ad
+# library_id:
+#   - SAMPLE1
+#   - SAMPLE2
+# output_dir:
+#   - /path/to/sample1/
+#   - /path/to/sample2/

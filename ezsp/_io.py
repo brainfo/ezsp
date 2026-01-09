@@ -1,7 +1,10 @@
-from pathlib import Path
+import pathlib
 import shutil
+from pathlib import Path
 
+import pandas as pd
 import spatialdata as sd
+from anndata import AnnData
 
 def safe_update_sdata(sdata, new_path, old_path=None):
     """Write to new location, verify, then optionally replace old."""
@@ -32,7 +35,7 @@ def save_adata_safe(adata: AnnData, path: pathlib.Path) -> None:
     removed_obsm = {}
     removed_uns = {}
     
-    # Handle DataFrames with non-string object columns (e.g., image_features with tuples)
+    # Handle DataFrames with non-string object columns
     for key in list(adata.obsm.keys()):
         obj = adata.obsm[key]
         if not isinstance(obj, pd.DataFrame):
@@ -59,7 +62,7 @@ def save_adata_safe(adata: AnnData, path: pathlib.Path) -> None:
             removed_obsm[key] = adata.obsm[key]
             del adata.obsm[key]
     
-    # Handle Tangram results
+    # Handle Tangram ct_pred results
     if "tangram_ct_pred" in adata.obsm:
         ct_names = adata.uns.get("tangram_ct_pred_names", [f"ct_{i}" for i in range(adata.obsm["tangram_ct_pred"].shape[1])])
         ct_df = pd.DataFrame(adata.obsm["tangram_ct_pred"], index=adata.obs_names, columns=ct_names)
@@ -71,9 +74,24 @@ def save_adata_safe(adata: AnnData, path: pathlib.Path) -> None:
         removed_uns["tangram_ct_pred_names"] = adata.uns["tangram_ct_pred_names"]
         del adata.uns["tangram_ct_pred_names"]
     
+    # Handle tangram_ct_count
+    if "tangram_ct_count" in adata.uns and isinstance(adata.uns["tangram_ct_count"], pd.DataFrame):
+        df = adata.uns["tangram_ct_count"].copy()
+        if "centroids" in df.columns:
+            df["centroids"] = df["centroids"].apply(lambda x: str(x.tolist()) if hasattr(x, 'tolist') else str(x))
+        df.to_csv(path.with_suffix(".tangram_ct_count.tsv"), sep="\t")
+        removed_uns["tangram_ct_count"] = adata.uns["tangram_ct_count"]
+        del adata.uns["tangram_ct_count"]
+    
+    if "tangram_cell_segmentation" in adata.uns and isinstance(adata.uns["tangram_cell_segmentation"], pd.DataFrame):
+        adata.uns["tangram_cell_segmentation"].to_csv(
+            path.with_suffix(".tangram_cell_segmentation.tsv"), sep="\t", index=False
+        )
+        removed_uns["tangram_cell_segmentation"] = adata.uns["tangram_cell_segmentation"]
+        del adata.uns["tangram_cell_segmentation"]
+    
     adata.write_h5ad(path)
     
-    # Restore for runtime use
     for key, val in removed_obsm.items():
         adata.obsm[key] = val
     for key, val in removed_uns.items():

@@ -14,7 +14,7 @@ class TestComputeSegmentationThresholds:
 
     def test_basic_thresholds(self, sample_image):
         """Test that thresholds are computed for a simple image."""
-        from ezsp.segment import compute_segmentation_thresholds
+        from ezsp._img_utils import compute_segmentation_thresholds
         
         thresholds = compute_segmentation_thresholds(sample_image, n_classes=3)
         
@@ -24,7 +24,7 @@ class TestComputeSegmentationThresholds:
 
     def test_thresholds_values_match_image_regions(self, sample_image):
         """Test that thresholds separate the distinct regions."""
-        from ezsp.segment import compute_segmentation_thresholds
+        from ezsp._img_utils import compute_segmentation_thresholds
         
         thresholds = compute_segmentation_thresholds(sample_image, n_classes=3)
         
@@ -37,7 +37,7 @@ class TestComputeSegmentationThresholds:
 
     def test_with_output_dir(self, sample_image, temp_dir):
         """Test histogram saving when output_dir is provided."""
-        from ezsp.segment import compute_segmentation_thresholds
+        from ezsp._img_utils import compute_segmentation_thresholds
         
         thresholds = compute_segmentation_thresholds(
             sample_image, n_classes=3, output_dir=temp_dir
@@ -48,7 +48,7 @@ class TestComputeSegmentationThresholds:
 
     def test_skip_existing_histogram(self, sample_image, temp_dir):
         """Test that existing histogram is not overwritten."""
-        from ezsp.segment import compute_segmentation_thresholds
+        from ezsp._img_utils import compute_segmentation_thresholds
         
         # Create existing histogram file
         existing_file = temp_dir / "histogram.pdf"
@@ -63,7 +63,7 @@ class TestComputeSegmentationThresholds:
     def test_with_xarray_input(self, sample_image):
         """Test that xarray DataArray input is handled correctly."""
         import xarray as xr
-        from ezsp.segment import compute_segmentation_thresholds
+        from ezsp._img_utils import compute_segmentation_thresholds
         
         # Convert numpy array to xarray DataArray
         img_xr = xr.DataArray(sample_image, dims=['y', 'x'])
@@ -79,7 +79,7 @@ class TestSegment:
 
     def test_basic_segmentation(self, sample_image):
         """Test that segmentation returns an ImageContainer."""
-        from ezsp.segment import segment
+        from ezsp._img_utils import segment
         import squidpy as sq
         
         result = segment(sample_image, thresh=100)
@@ -89,7 +89,7 @@ class TestSegment:
 
     def test_segmentation_with_different_thresholds(self, sample_image):
         """Test segmentation with different threshold values."""
-        from ezsp.segment import segment
+        from ezsp._img_utils import segment
         
         result_low = segment(sample_image, thresh=50)
         result_high = segment(sample_image, thresh=200)
@@ -105,7 +105,7 @@ class TestSegment:
     def test_sets_numba_threads(self, sample_image):
         """Test that NUMBA_NUM_THREADS is set to 1."""
         import os
-        from ezsp.segment import segment
+        from ezsp._img_utils import segment
         
         segment(sample_image, thresh=100)
         
