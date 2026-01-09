@@ -1,6 +1,8 @@
 easily using scikit-image, squidpy, tangram to segment, deconvolute, and map.
 
 ```python
-python -m ezsp tangram config.yaml   # runs tg_adata pipeline
-python -m ezsp plot config.yaml      # runs pl plotting
+python -m ezsp tangram tangram.yaml   # runs tg_adata pipeline
+python -m ezsp plot plot.yaml      # runs pl plotting
 ```
+
+See config templates in config/
