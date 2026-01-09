@@ -10,7 +10,6 @@ dependencies = [
     "tangram-sc>=1.0.4",
     "spatialdata>=0.2",
     "spatialdata-plot>=0.2",
-    "img_norm",
 ]
 
 [project.scripts]
@@ -29,5 +28,4 @@ dev = [
 package = true
 
 [tool.uv.sources]
-img_norm = { git = "https://github.com/brainfo/imgnorms", branch = "main" }
 tangram-sc = { git = "https://github.com/brainfo/Tangram"}
