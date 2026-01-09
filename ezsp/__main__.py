@@ -13,7 +13,7 @@ from ._pp import load_config, setup_logging
 
 def tangram_main(args):
     """Run Tangram deconvolution pipeline."""
-    from .tg_adata import run_batch, run_pipeline
+    from ._api import run_tangram_batch, run_tangram_pipeline
 
     config = load_config(args.config)
     
@@ -50,9 +50,9 @@ def tangram_main(args):
                 params["cell_types"] = set(proportions[i].keys())
             batch_params.append(params)
         
-        run_batch(batch_params, max_workers=config.get("max_workers", 1))
+        run_tangram_batch(batch_params, max_workers=config.get("max_workers", 1))
     else:
-        run_pipeline(
+        run_tangram_pipeline(
             sdata_path=config["sdata_path"],
             sc_path=config["sc_path"],
             output_dir=config["output_dir"],
@@ -79,14 +79,15 @@ def tangram_main(args):
 
 def plot_main(args):
     """Run plotting."""
-    from .pl import plot_tangram_proportion, run_batch as plot_run_batch
+    from ._api import run_plot_batch
+    from .pl import plot_tangram_proportion
 
     setup_logging(verbose=args.verbose)
     input_path = pathlib.Path(args.config_or_h5ad)
     
     if input_path.suffix in (".yaml", ".yml"):
         config = load_config(args.config_or_h5ad)
-        plot_run_batch(config)
+        run_plot_batch(config)
     elif input_path.suffix == ".h5ad":
         if not args.output_dir or not args.library_id:
             print("ERROR: --output-dir and --library-id required for single file mode")

@@ -177,9 +177,9 @@ class TestRunSingleSample:
 
     def test_returns_success_tuple(self, temp_dir):
         """Test successful run returns (sample_id, True, 'Success')."""
-        from ezsp.tg_adata import run_single_sample
+        from ezsp._api import run_tangram_single as run_single_sample
         
-        with patch('ezsp.tg_adata.run_pipeline') as mock_pipeline:
+        with patch('ezsp._api.run_tangram_pipeline') as mock_pipeline:
             result = run_single_sample({
                 "library_id": "test_sample",
                 "log_dir": str(temp_dir),
@@ -189,9 +189,9 @@ class TestRunSingleSample:
 
     def test_returns_failure_tuple_on_error(self, temp_dir):
         """Test that errors return (sample_id, False, error_message)."""
-        from ezsp.tg_adata import run_single_sample
+        from ezsp._api import run_tangram_single as run_single_sample
         
-        with patch('ezsp.tg_adata.run_pipeline', side_effect=ValueError("Test error")):
+        with patch('ezsp._api.run_tangram_pipeline', side_effect=ValueError("Test error")):
             result = run_single_sample({
                 "library_id": "test_sample",
                 "log_dir": str(temp_dir),
@@ -203,11 +203,11 @@ class TestRunSingleSample:
 
     def test_creates_crash_log_on_error(self, temp_dir):
         """Test that crash.log is created on error."""
-        from ezsp.tg_adata import run_single_sample
+        from ezsp._api import run_tangram_single as run_single_sample
         
         log_dir = temp_dir / "logs"
         
-        with patch('ezsp.tg_adata.run_pipeline', side_effect=RuntimeError("Crash!")):
+        with patch('ezsp._api.run_tangram_pipeline', side_effect=RuntimeError("Crash!")):
             run_single_sample({
                 "library_id": "test_sample",
                 "log_dir": str(log_dir),
@@ -224,14 +224,14 @@ class TestRunBatch:
 
     def test_runs_all_samples(self, temp_dir):
         """Test that all samples are processed."""
-        from ezsp.tg_adata import run_batch
+        from ezsp._api import run_tangram_batch as run_batch
         
         batch_params = [
             {"library_id": "sample_1", "log_dir": str(temp_dir)},
             {"library_id": "sample_2", "log_dir": str(temp_dir)},
         ]
         
-        with patch('ezsp.tg_adata.run_single_sample', return_value=("x", True, "")) as mock_run:
+        with patch('ezsp._api.run_tangram_single', return_value=("x", True, "")) as mock_run:
             run_batch(batch_params, max_workers=1)
         
         assert mock_run.call_count == 2
