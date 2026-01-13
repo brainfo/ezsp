@@ -9,7 +9,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import squidpy as sq
 import xarray
-from skimage.filters import threshold_multiotsu
+from scipy import ndimage
+from skimage import color, measure, morphology
+from skimage.filters import frangi, threshold_multiotsu, threshold_otsu
 
 logger = logging.getLogger(__name__)
 
@@ -75,3 +77,116 @@ def segment(img: np.ndarray | xarray.DataArray,
     sq.im.segment(img=imgc, layer="image", method="watershed", thresh=thresh, geq=False)
 
     return imgc
+
+
+def segment_villi(
+    img: np.ndarray,
+    min_area: int = 1000,
+    max_area: int = 500000,
+    ridge_sigmas: tuple[float, ...] = (1.0, 2.0, 3.0, 4.0),
+    line_threshold: float | None = None,
+    merge_kernel_size: int = 8,
+    separation_dilation: int = 3,
+) -> np.ndarray:
+    """
+    Segment villi from histology image using combined background and border detection.
+    
+    Detects villi as tissue regions separated by:
+    1. White/bright lumen background
+    2. Purple border lines (detected using Frangi ridge filter)
+    
+    Args:
+        img: RGB image array (H, W, 3) in uint8 or float format
+        min_area: Minimum area in pixels for a valid villus
+        max_area: Maximum area in pixels for a valid villus  
+        ridge_sigmas: Sigma values for multi-scale Frangi ridge filter
+        line_threshold: Threshold for ridge response (auto Otsu if None)
+        merge_kernel_size: Kernel size for merging over-fragmented regions
+        separation_dilation: Dilation radius for separation mask
+        
+    Returns:
+        Instance segmentation mask (H, W) where each villus has a unique label (0 = background)
+    """
+    logger.info("Starting villi segmentation using ridge + background detection")
+    
+    # Convert to float if needed
+    if img.dtype == np.uint8:
+        img_float = img.astype(np.float32) / 255.0
+    else:
+        img_float = img.astype(np.float32)
+    
+    # Step 1: Convert to LAB color space
+    lab = color.rgb2lab(img_float)
+    L, a = lab[:, :, 0], lab[:, :, 1]
+    
+    # Purple score for ridge detection: lower L and higher a = more purple
+    purple_score = (-L / 100.0 + a / 128.0 + 1.0) / 2.0
+    purple_score = np.clip(purple_score, 0, 1)
+    
+    logger.debug(f"Purple score range: [{purple_score.min():.3f}, {purple_score.max():.3f}]")
+    
+    # Step 2: Detect background (white lumen) using L channel
+    # Background is the brightest class
+    L_thresholds = threshold_multiotsu(L, classes=3)
+    background_mask = L > L_thresholds[1]
+    logger.debug(f"Background threshold (L): {L_thresholds[1]:.1f}")
+    
+    # Step 3: Detect purple border LINES using Frangi ridge filter
+    ridges = frangi(purple_score, sigmas=ridge_sigmas, black_ridges=False)
+    
+    if line_threshold is None:
+        ridge_nonzero = ridges[ridges > 0]
+        if len(ridge_nonzero) > 0:
+            line_threshold = threshold_otsu(ridge_nonzero)
+        else:
+            line_threshold = 0.01
+        logger.info(f"Auto-computed ridge threshold: {line_threshold:.6f}")
+    
+    border_lines = ridges > line_threshold
+    logger.debug(f"Border line pixels: {border_lines.sum()}")
+    
+    # Step 4: Combine background and border lines as separation
+    # Both white lumen AND purple borders separate individual villi
+    separation = background_mask | border_lines
+    separation_dilated = morphology.dilation(separation, morphology.disk(separation_dilation))
+    
+    # Step 5: Detect valid image area (exclude black borders)
+    img_mean = np.mean(img, axis=2)
+    valid_area = img_mean > 20
+    
+    # Villi = NOT separation AND in valid area
+    villi_mask = (~separation_dilated) & valid_area
+    
+    # Step 6: Clean up villi mask
+    # Remove small noise
+    villi_cleaned = morphology.remove_small_objects(villi_mask.astype(bool), min_size=min_area // 4)
+    
+    # Fill small holes
+    villi_filled = ndimage.binary_fill_holes(villi_cleaned)
+    
+    # Merge over-fragmented pieces using morphological closing
+    villi_merged = morphology.closing(villi_filled, morphology.disk(merge_kernel_size))
+    villi_merged = ndimage.binary_fill_holes(villi_merged)
+    
+    # Step 7: Label connected components
+    labeled, num_features = ndimage.label(villi_merged)
+    logger.info(f"Found {num_features} regions before size filter")
+    
+    # Step 8: Filter by size
+    regions = measure.regionprops(labeled)
+    valid_labels = []
+    
+    for region in regions:
+        if min_area <= region.area <= max_area:
+            valid_labels.append(region.label)
+        else:
+            logger.debug(f"Filtered region {region.label}: area={region.area}")
+    
+    # Create final mask with valid regions, relabeled sequentially
+    final_mask = np.zeros_like(labeled)
+    for new_label, old_label in enumerate(valid_labels, start=1):
+        final_mask[labeled == old_label] = new_label
+    
+    logger.info(f"Segmented {len(valid_labels)} villi (area range: {min_area}-{max_area})")
+    
+    return final_mask
