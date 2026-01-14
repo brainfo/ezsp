@@ -82,11 +82,12 @@ def segment(img: np.ndarray | xarray.DataArray,
 def segment_villi(
     img: np.ndarray,
     min_area: int = 1000,
-    max_area: int = 500000,
+    max_area: int = 1000000,
     ridge_sigmas: tuple[float, ...] = (1.0, 2.0, 3.0, 4.0),
     line_threshold: float | None = None,
     merge_kernel_size: int = 8,
     separation_dilation: int = 3,
+    local_block_size: int = 501,
 ) -> np.ndarray:
     """
     Segment villi from histology image using combined background and border detection.
@@ -103,6 +104,7 @@ def segment_villi(
         line_threshold: Threshold for ridge response (auto Otsu if None)
         merge_kernel_size: Kernel size for merging over-fragmented regions
         separation_dilation: Dilation radius for separation mask
+        local_block_size: Block size for local adaptive thresholding (must be odd)
         
     Returns:
         Instance segmentation mask (H, W) where each villus has a unique label (0 = background)
@@ -125,11 +127,18 @@ def segment_villi(
     
     logger.debug(f"Purple score range: [{purple_score.min():.3f}, {purple_score.max():.3f}]")
     
-    # Step 2: Detect background (white lumen) using L channel
-    # Background is the brightest class
-    L_thresholds = threshold_multiotsu(L, classes=3)
-    background_mask = L > L_thresholds[1]
-    logger.debug(f"Background threshold (L): {L_thresholds[1]:.1f}")
+    # Step 2: Detect background using LOCAL adaptive thresholding
+    # This handles uneven illumination across the tissue
+    from skimage.filters import threshold_local
+    
+    # Ensure block_size is odd and not larger than image
+    block_size = min(local_block_size, min(L.shape) - 1)
+    if block_size % 2 == 0:
+        block_size += 1
+    
+    local_thresh = threshold_local(L, block_size=block_size, method='gaussian', offset=-5)
+    background_mask = L > local_thresh
+    logger.info(f"Using local adaptive threshold with block_size={block_size}")
     
     # Step 3: Detect purple border LINES using Frangi ridge filter
     ridges = frangi(purple_score, sigmas=ridge_sigmas, black_ridges=False)
@@ -170,23 +179,60 @@ def segment_villi(
     
     # Step 7: Label connected components
     labeled, num_features = ndimage.label(villi_merged)
-    logger.info(f"Found {num_features} regions before size filter")
+    logger.info(f"Found {num_features} regions before filtering")
     
-    # Step 8: Filter by size
-    regions = measure.regionprops(labeled)
+    # Step 8: Filter by size AND by mean brightness (reject white background regions)
+    regions = measure.regionprops(labeled, intensity_image=L)
     valid_labels = []
     
     for region in regions:
-        if min_area <= region.area <= max_area:
-            valid_labels.append(region.label)
-        else:
-            logger.debug(f"Filtered region {region.label}: area={region.area}")
+        # Filter by size
+        if not (min_area <= region.area <= max_area):
+            logger.debug(f"Filtered region {region.label}: area={region.area} (outside range)")
+            continue
+        
+        # Filter out white/background regions (mean L > 80 is too bright = background)
+        mean_L = region.mean_intensity
+        if mean_L > 80:
+            logger.debug(f"Filtered region {region.label}: mean_L={mean_L:.1f} (too bright, likely background)")
+            continue
+            
+        valid_labels.append(region.label)
+    
+    logger.info(f"After size and brightness filter: {len(valid_labels)} regions")
+    
+    # Step 9: Handle nested/contained regions - keep only outer boundaries
+    # If region A is completely inside region B, remove A
+    filtered_regions = [r for r in regions if r.label in valid_labels]
+    
+    # Sort by area (largest first) to process outer regions first
+    filtered_regions.sort(key=lambda r: r.area, reverse=True)
+    
+    # Build a mask to track which pixels are already claimed by larger regions
+    claimed_mask = np.zeros_like(labeled, dtype=bool)
+    final_labels = []
+    
+    for region in filtered_regions:
+        region_mask = labeled == region.label
+        
+        # Check if this region is mostly contained within already-claimed areas
+        overlap = np.sum(region_mask & claimed_mask)
+        containment_ratio = overlap / region.area
+        
+        if containment_ratio > 0.8:  # 80% contained = nested region, skip it
+            logger.debug(f"Filtered region {region.label}: {containment_ratio:.1%} contained in larger region")
+            continue
+        
+        final_labels.append(region.label)
+        claimed_mask |= region_mask
+    
+    logger.info(f"After containment filter: {len(final_labels)} regions")
     
     # Create final mask with valid regions, relabeled sequentially
     final_mask = np.zeros_like(labeled)
-    for new_label, old_label in enumerate(valid_labels, start=1):
+    for new_label, old_label in enumerate(final_labels, start=1):
         final_mask[labeled == old_label] = new_label
     
-    logger.info(f"Segmented {len(valid_labels)} villi (area range: {min_area}-{max_area})")
+    logger.info(f"Segmented {len(final_labels)} villi (area range: {min_area}-{max_area})")
     
     return final_mask
