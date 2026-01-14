@@ -85,7 +85,7 @@ def segment_villi(
     max_area: int = 1000000,
     ridge_sigmas: tuple[float, ...] = (1.0, 2.0, 3.0, 4.0),
     line_threshold: float | None = None,
-    merge_kernel_size: int = 8,
+    merge_kernel_size: int = 10,
     separation_dilation: int = 3,
     local_block_size: int = 501,
 ) -> np.ndarray:
@@ -166,15 +166,27 @@ def segment_villi(
     # Villi = NOT separation AND in valid area
     villi_mask = (~separation_dilated) & valid_area
     
-    # Step 6: Clean up villi mask
-    # Remove small noise
+    # Step 6: Clean up villi mask with aggressive morphological operations
+    # This prevents internal dark regions (like vessels) from fragmenting villi
+    
+    # Remove small noise first
     villi_cleaned = morphology.remove_small_objects(villi_mask.astype(bool), min_size=min_area // 4)
     
-    # Fill small holes
+    # Fill ALL holes - this merges internal vessel regions into villi
     villi_filled = ndimage.binary_fill_holes(villi_cleaned)
     
-    # Merge over-fragmented pieces using morphological closing
-    villi_merged = morphology.closing(villi_filled, morphology.disk(merge_kernel_size))
+    # Aggressive closing to bridge gaps from vessel edges
+    # Use larger kernel to connect fragmented pieces
+    villi_closed = morphology.closing(villi_filled, morphology.disk(merge_kernel_size))
+    
+    # Fill holes again after closing (closing may create new fillable holes)
+    villi_filled2 = ndimage.binary_fill_holes(villi_closed)
+    
+    # Opening to smooth edges without fragmenting
+    villi_opened = morphology.opening(villi_filled2, morphology.disk(merge_kernel_size // 2))
+    
+    # Final closing and hole fill
+    villi_merged = morphology.closing(villi_opened, morphology.disk(merge_kernel_size))
     villi_merged = ndimage.binary_fill_holes(villi_merged)
     
     # Step 7: Label connected components
@@ -192,7 +204,7 @@ def segment_villi(
             continue
         
         # Filter out white/background regions (mean L > 80 is too bright = background)
-        mean_L = region.mean_intensity
+        mean_L = region.intensity_mean
         if mean_L > 80:
             logger.debug(f"Filtered region {region.label}: mean_L={mean_L:.1f} (too bright, likely background)")
             continue
