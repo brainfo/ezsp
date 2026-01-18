@@ -16,27 +16,68 @@ from skimage.filters import frangi, threshold_multiotsu, threshold_otsu
 logger = logging.getLogger(__name__)
 
 def normalize_block(block, p_low=1, p_high=99, gamma=0.5):
+    """Normalize a numpy block to uint8."""
     result = np.empty(block.shape, dtype=np.uint8)
     for c in range(block.shape[0]):
         ch = block[c].astype(np.float32)
         p1, p99 = np.percentile(ch.ravel()[::10], [p_low, p_high])
         ch = np.clip(ch, p1, p99)
-        result[c] = (((ch - p1) / (p99 - p1)) ** gamma * 255).astype(np.uint8)
+        result[c] = (((ch - p1) / (p99 - p1 + 1e-8)) ** gamma * 255).astype(np.uint8)
     return result
 
 def normalize_image(img, p_low=1, p_high=99, gamma=0.5, compute=False):
-    """Normalize xarray or numpy image"""
+    """
+    Normalize image to uint8.
+    
+    Parameters
+    ----------
+    img : np.ndarray, xr.DataArray, or xr.DataTree
+        Input image with shape (c, y, x)
+    p_low, p_high : float
+        Percentiles for contrast stretching
+    gamma : float
+        Gamma correction value
+    compute : bool
+        If True, compute dask arrays immediately
+    
+    Returns
+    -------
+    Same type as input, with uint8 dtype
+    """
+    # Handle numpy array
     if isinstance(img, np.ndarray):
         return normalize_block(img, p_low, p_high, gamma)
     
-    img_normalized = da.map_blocks(
-        partial(normalize_block, p_low=p_low, p_high=p_high, gamma=gamma),
-        img.data,
-        dtype=np.uint8,
-        meta=np.array((), dtype=np.uint8)
-    )
-    result = img.copy(data=img_normalized)
-    return result.compute() if compute else result
+    # Handle DataTree
+    if isinstance(img, xr.DataTree):
+        new_nodes = {}
+        for path, node in img.subtree_with_keys:
+            if node.has_data and "image" in node.ds.data_vars:
+                ds = node.ds
+                img_normalized = normalize_image(
+                    ds["image"], p_low=p_low, p_high=p_high, gamma=gamma, compute=compute
+                )
+                new_nodes[path] = ds.assign(image=img_normalized)
+            else:
+                new_nodes[path] = xr.Dataset()
+        return xr.DataTree.from_dict(new_nodes)
+    
+    # Handle DataArray (with dask or numpy backend)
+    if isinstance(img, xr.DataArray):
+        if isinstance(img.data, da.Array):
+            img_normalized = da.map_blocks(
+                partial(normalize_block, p_low=p_low, p_high=p_high, gamma=gamma),
+                img.data,
+                dtype=np.uint8,
+                meta=np.array((), dtype=np.uint8)
+            )
+            result = img.copy(data=img_normalized)
+            return result.compute() if compute else result
+        else:
+            # numpy-backed DataArray
+            return img.copy(data=normalize_block(img.values, p_low, p_high, gamma))
+    
+    raise TypeError(f"Unsupported type: {type(img)}")
 
 def compute_segmentation_thresholds(
     img: np.ndarray,
