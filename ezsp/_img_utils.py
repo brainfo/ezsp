@@ -85,7 +85,7 @@ def segment_villi(
     max_area: int = 1000000,
     ridge_sigmas: tuple[float, ...] = (1.0, 2.0, 3.0, 4.0),
     line_threshold: float | None = None,
-    merge_kernel_size: int = 10,
+    merge_kernel_size: int = 8,
     separation_dilation: int = 3,
     local_block_size: int = 501,
 ) -> np.ndarray:
@@ -152,11 +152,17 @@ def segment_villi(
         logger.info(f"Auto-computed ridge threshold: {line_threshold:.6f}")
     
     border_lines = ridges > line_threshold
-    logger.debug(f"Border line pixels: {border_lines.sum()}")
+    logger.debug(f"Border line pixels before filtering: {border_lines.sum()}")
     
-    # Step 4: Combine background and border lines as separation
-    # Both white lumen AND purple borders separate individual villi
-    separation = background_mask | border_lines
+    # Step 3b: Filter border lines - keep only those ADJACENT to background
+    # Real villi borders have background on one side; internal vessel edges have tissue on both sides
+    background_dilated = morphology.dilation(background_mask, morphology.disk(5))
+    border_lines_filtered = border_lines & background_dilated
+    logger.info(f"Border line pixels after background-adjacency filter: {border_lines_filtered.sum()}")
+    
+    # Step 4: Combine background and filtered border lines as separation
+    # Both white lumen AND purple borders (that touch background) separate individual villi
+    separation = background_mask | border_lines_filtered
     separation_dilated = morphology.dilation(separation, morphology.disk(separation_dilation))
     
     # Step 5: Detect valid image area (exclude black borders)
@@ -193,9 +199,12 @@ def segment_villi(
     labeled, num_features = ndimage.label(villi_merged)
     logger.info(f"Found {num_features} regions before filtering")
     
-    # Step 8: Filter by size AND by mean brightness (reject white background regions)
+    # Step 8: Filter by size, brightness, AND background adjacency
     regions = measure.regionprops(labeled, intensity_image=L)
     valid_labels = []
+    
+    # Dilate background slightly to check adjacency
+    background_check = morphology.dilation(background_mask, morphology.disk(3))
     
     for region in regions:
         # Filter by size
@@ -208,10 +217,20 @@ def segment_villi(
         if mean_L > 80:
             logger.debug(f"Filtered region {region.label}: mean_L={mean_L:.1f} (too bright, likely background)")
             continue
+        
+        # NEW: Filter out regions that DON'T touch background
+        # Internal regions (vessels inside villi) are completely surrounded by tissue, not background
+        region_mask = labeled == region.label
+        region_dilated = morphology.dilation(region_mask, morphology.disk(2))
+        touches_background = np.any(region_dilated & background_check)
+        
+        if not touches_background:
+            logger.debug(f"Filtered region {region.label}: doesn't touch background (internal vessel)")
+            continue
             
         valid_labels.append(region.label)
     
-    logger.info(f"After size and brightness filter: {len(valid_labels)} regions")
+    logger.info(f"After size, brightness, and background-touch filter: {len(valid_labels)} regions")
     
     # Step 9: Handle nested/contained regions - keep only outer boundaries
     # If region A is completely inside region B, remove A

@@ -6,9 +6,37 @@ import pandas as pd
 import spatialdata as sd
 from anndata import AnnData
 
-def safe_update_sdata(sdata, new_path, old_path=None):
+def rechunk_datatree(dt, chunk_size=4096):
+    """Rechunk all scales in DataTree for zarr compatibility."""
+    import xarray as xr
+    
+    new_nodes = {}
+    for path, node in dt.subtree_with_keys:
+        if node.has_data and "image" in node.ds.data_vars:
+            ds = node.ds
+            img = ds["image"]
+            
+            # Regular chunks: 1 per channel, chunk_size or image size for y/x
+            chunks = {
+                "c": 1,
+                "y": min(chunk_size, img.sizes["y"]),
+                "x": min(chunk_size, img.sizes["x"])
+            }
+            img_rechunked = img.chunk(chunks)
+            new_nodes[path] = ds.assign(image=img_rechunked)
+        else:
+            new_nodes[path] = xr.Dataset()
+    
+    return xr.DataTree.from_dict(new_nodes)
+
+def safe_update_sdata(sdata, new_path, rechunk_img=False, old_path=None):
     """Write to new location, verify, then optionally replace old."""
     new_path = Path(new_path)
+
+    if rechunk_img:
+        ## rechunk all image elements
+        for key in sdata.images.keys():
+            sdata.images[key] = rechunk_datatree(sdata.images[key], chunk_size=4096)
     
     # 1. Write to new location
     sdata.write(new_path)
