@@ -212,8 +212,14 @@ def save_crops(
     n_requested: int | None = None,
     spatial_extent: tuple[float, float, float, float] | None = None,
     metadata: dict[str, Any] | None = None,
+    sdata=None,
+    crop_shapes_key: str = "crop_boxes",
 ) -> Path:
     """Save crop coordinates and generation parameters to a JSON file.
+
+    When *sdata* is provided the crops are also stored as box polygons in
+    ``sdata.shapes[crop_shapes_key]`` and persisted with
+    ``sdata.write_element(crop_shapes_key)``.
 
     Returns the resolved output path.
     """
@@ -235,6 +241,25 @@ def save_crops(
 
     with open(filepath, "w") as fh:
         json.dump(doc, fh, indent=2)
+
+    # Persist as SpatialData shapes element
+    if sdata is not None and crops:
+        try:
+            from shapely import box
+            import geopandas as gpd
+            from spatialdata.models import ShapesModel
+
+            gdf = gpd.GeoDataFrame(
+                {"crop_id": [f"crop_{i}" for i in range(len(crops))]},
+                geometry=[box(x1, y1, x2, y2) for x1, y1, x2, y2 in crops],
+            )
+            gdf = ShapesModel.parse(gdf)
+            sdata.shapes[crop_shapes_key] = gdf
+            if sdata.is_backed():
+                sdata.write_element(crop_shapes_key, overwrite=True)
+                logger.info("Wrote shapes element %r to backing store", crop_shapes_key)
+        except Exception:
+            logger.exception("Failed to write crop shapes to SpatialData")
 
     return filepath
 
@@ -275,8 +300,13 @@ def generate_and_save_crops(
     spatial_key: str = "spatial",
     table_key: str | None = None,
     metadata: dict[str, Any] | None = None,
+    crop_shapes_key: str = "crop_boxes",
 ) -> list[tuple[float, float, float, float]]:
     """Generate crops, optionally validate them, save to JSON, and return.
+
+    When *data* is a ``SpatialData`` object the crops are additionally stored
+    as box polygons in ``sdata.shapes[crop_shapes_key]`` and written to the
+    backing store.
 
     Parameters
     ----------
@@ -309,6 +339,9 @@ def generate_and_save_crops(
         ``None`` searches all tables for one containing *spatial_key*.
     metadata
         Arbitrary extra info stored in the JSON.
+    crop_shapes_key
+        Name of the shapes element stored in SpatialData (default
+        ``"crop_boxes"``).  Ignored when *data* is an ``AnnData``.
     """
     extent = get_spatial_extent(data, shapes_key=shapes_key, spatial_key=spatial_key)
     if extent is None:
@@ -351,6 +384,9 @@ def generate_and_save_crops(
                 crops, adata, min_cells=min_cells, spatial_key=spatial_key,
             )
 
+    # Pass sdata only when data is a SpatialData object (has .shapes attr)
+    _sdata = data if hasattr(data, "shapes") else None
+
     save_crops(
         crops,
         output_path,
@@ -361,6 +397,8 @@ def generate_and_save_crops(
         n_requested=n_crops,
         spatial_extent=extent,
         metadata=metadata,
+        sdata=_sdata,
+        crop_shapes_key=crop_shapes_key,
     )
 
     return crops
